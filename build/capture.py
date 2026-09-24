@@ -43,6 +43,23 @@ if __name__ == '__main__' and os.environ.get('FEATHER_ONLY'):
         feather(Image.open(pth).convert('RGBA')).save(pth, 'WEBP', quality=86, method=6)
     raise SystemExit('feathered existing images')
 
+# The stand's meridian ring is tilted 23.44 degrees clockwise, the Earth's obliquity; each globe is turned so its
+# north pole points at the ring's upper pin. AXIS measures, in the live page, how far clockwise from straight up
+# the globe's own north pole already points, so the turn is TILT less that. The three Earth globes are drawn
+# with no roll (pole straight up). The celestial globe is drawn in sky coordinates centred on the zenith, also
+# with no roll, and may be mirrored, so its pole is measured by projecting the south celestial pole.
+TILT = 23.44
+AXIS = {
+    'world-time-zones': "WTZ.rotation()[2] || 0",
+    'river-valleys': "RV.rotation()[2] || 0",
+    'history-atlas': "HA.rotation()[2] || 0",
+    'celestial-globe': """(function () {
+        var c = CG.centre(), s = CG.proj(CG.unitv(0, -90)), n = CG.proj(CG.unitv(0, 90));
+        if (s) return Math.atan2(-(s[0] - c[0]), s[1] - c[1]) * 180 / Math.PI;   /* south pole, from straight down */
+        if (n) return Math.atan2(n[0] - c[0], -(n[1] - c[1])) * 180 / Math.PI;   /* north pole, from straight up */
+        return 0; })()""",
+}
+
 with sync_playwright() as pw:
     b = pw.chromium.launch()
     for key, url, setup in SITES:
@@ -62,18 +79,22 @@ with sync_playwright() as pw:
                 pg.wait_for_timeout(600)
         pg.add_style_tag(content=HIDE)
         pg.wait_for_timeout(400)
+        axis = float(pg.evaluate(AXIS[key]) or 0) if key in AXIS else 0.0
         png = pg.screenshot(omit_background=True)
         im = Image.open(io.BytesIO(png)).convert('RGBA')
-        a = im.split()[3].point(lambda v: 255 if v > 24 else 0)
-        box = a.getbbox()
-        im = im.crop(box)
-        side = max(im.size)
-        sq = Image.new('RGBA', (side, side), (0, 0, 0, 0))
-        sq.paste(im, ((side - im.size[0]) // 2, (side - im.size[1]) // 2))
+        # the sphere itself is opaque; its glow is not. Centre on the sphere, so the turn is about its own axis.
+        disc = im.split()[3].point(lambda v: 255 if v > 250 else 0).getbbox()
+        box = disc
+        cx, cy = (disc[0] + disc[2]) / 2, (disc[1] + disc[3]) / 2
+        half = int(max(disc[2] - disc[0], disc[3] - disc[1]) / 2 * 1.07)      # a little glow, and the ring close
+        sq = Image.new('RGBA', (2 * half, 2 * half), (0, 0, 0, 0))
+        sq.paste(im, (int(half - cx), int(half - cy)))
+        sq = sq.rotate(-(TILT - axis), resample=Image.BICUBIC)      # PIL turns anticlockwise for a positive angle
         sq = sq.resize((560, 560), Image.LANCZOS)
         sq = feather(sq)
         path = os.path.join(OUT, key + '.webp')
         sq.save(path, 'WEBP', quality=86, method=6)
-        print('%-18s crop %s -> %s  %d kB' % (key, box, os.path.basename(path), os.path.getsize(path) // 1024))
+        print('%-18s pole at %+.2f deg, turned %.2f deg clockwise; sphere %s -> %s  %d kB' % (
+            key, axis, TILT - axis, box, os.path.basename(path), os.path.getsize(path) // 1024))
         pg.close()
     b.close()
